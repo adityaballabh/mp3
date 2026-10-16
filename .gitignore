@@ -10,3 +10,8 @@ public/*
 
 # Environment variables (copy .env.example to .env). Never commit .env
 .env
+
+AGENTS.md
+CLAUDE.md
+
+.prettierrc
