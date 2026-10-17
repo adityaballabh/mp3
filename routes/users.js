@@ -1,6 +1,17 @@
+var mongoose = require('mongoose');
 var common = require('./common');
 var queryParams = require('./query');
+var Task = require('../models/task');
 var User = require('../models/user');
+
+function areTaskIds(values) {
+    for (var value of values) {
+        if (!mongoose.isObjectIdOrHexString(value)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 function validateUser(body) {
     if (!common.isFilledString(body.name)) {
@@ -8,6 +19,12 @@ function validateUser(body) {
     }
     if (!common.isFilledString(body.email)) {
         return 'User email is required';
+    }
+    if (body.pendingTasks != null && !Array.isArray(body.pendingTasks)) {
+        return 'User pendingTasks must be a list';
+    }
+    if (body.pendingTasks != null && !areTaskIds(body.pendingTasks)) {
+        return 'User pendingTasks must contain valid task ids';
     }
     return null;
 }
@@ -17,8 +34,46 @@ function userFields(body) {
     return {
         name: body.name,
         email: body.email,
-        pendingTasks: body.pendingTasks ?? [],
+        // Drop repeated ids so each task is listed once
+        pendingTasks: [...new Set(body.pendingTasks ?? [])],
     };
+}
+
+// Check that every listed task exists and is still pending
+async function checkPendingTasks(taskIds) {
+    var tasks = await Task.find({ _id: { $in: taskIds } }, { completed: 1 });
+    if (tasks.length !== taskIds.length) {
+        return { status: 404, message: 'A task in pendingTasks does not exist' };
+    }
+    for (var task of tasks) {
+        if (task.completed) {
+            return { status: 400, message: 'A completed task cannot be in pendingTasks' };
+        }
+    }
+    return null;
+}
+
+function unassignTasks(filter) {
+    return Task.updateMany(filter, { assignedUser: '', assignedUserName: 'unassigned' });
+}
+
+// Point tasks at the user's new pendingTasks, moving any that belonged to another user
+async function syncAssignedTasks(user, oldTaskIds) {
+    var userId = String(user._id);
+    var newTaskIds = user.pendingTasks.toObject();
+    var droppedTaskIds = oldTaskIds.filter(function (taskId) {
+        return !newTaskIds.includes(taskId);
+    });
+    await unassignTasks({ _id: { $in: droppedTaskIds }, assignedUser: userId });
+    await User.updateMany(
+        { _id: { $ne: user._id }, pendingTasks: { $in: newTaskIds } },
+        { $pull: { pendingTasks: { $in: newTaskIds } } },
+    );
+    // Also refresh the name on tasks the user already had, completed ones included
+    await Task.updateMany(
+        { $or: [{ _id: { $in: newTaskIds } }, { assignedUser: userId }] },
+        { assignedUser: userId, assignedUserName: user.name },
+    );
 }
 
 async function isEmailTaken(email, ownId) {
@@ -77,7 +132,17 @@ module.exports = function (router) {
             if (await isEmailTaken(body.email)) {
                 return sendEmailTaken(res);
             }
-            var user = await User.create(userFields(body));
+            var fields = userFields(body);
+            var taskError = await checkPendingTasks(fields.pendingTasks);
+            if (taskError) {
+                return res.status(taskError.status).json({ message: taskError.message, data: {} });
+            }
+            // Write the user and its task updates together so a failure leaves nothing half done
+            var user = await mongoose.connection.transaction(async function () {
+                var createdUser = await User.create(fields);
+                await syncAssignedTasks(createdUser, []);
+                return createdUser;
+            });
             res.status(201).json({ message: 'User created', data: user });
         } catch (err) {
             sendSaveError(res, err);
@@ -124,8 +189,17 @@ module.exports = function (router) {
             if (await isEmailTaken(body.email, user._id)) {
                 return sendEmailTaken(res);
             }
-            user.set(userFields(body));
-            await user.save();
+            var fields = userFields(body);
+            var taskError = await checkPendingTasks(fields.pendingTasks);
+            if (taskError) {
+                return res.status(taskError.status).json({ message: taskError.message, data: {} });
+            }
+            var oldTaskIds = user.pendingTasks.toObject();
+            user.set(fields);
+            await mongoose.connection.transaction(async function () {
+                await user.save();
+                await syncAssignedTasks(user, oldTaskIds);
+            });
             res.status(200).json({ message: 'User updated', data: user });
         } catch (err) {
             sendSaveError(res, err);
@@ -138,7 +212,10 @@ module.exports = function (router) {
             if (!user) {
                 return res.status(404).json({ message: 'User not found', data: {} });
             }
-            await user.deleteOne();
+            await mongoose.connection.transaction(async function () {
+                await user.deleteOne();
+                await unassignTasks({ assignedUser: String(user._id) });
+            });
             res.status(200).json({ message: 'User deleted', data: user });
         } catch (err) {
             common.sendServerError(res);

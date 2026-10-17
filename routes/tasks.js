@@ -2,6 +2,7 @@ var mongoose = require('mongoose');
 var common = require('./common');
 var queryParams = require('./query');
 var Task = require('../models/task');
+var User = require('../models/user');
 
 var castDate = mongoose.Schema.Types.Date.cast();
 var castBoolean = mongoose.Schema.Types.Boolean.cast();
@@ -36,6 +37,9 @@ function validateTask(body) {
     if (!isOptionalString(body.assignedUser) || !isOptionalString(body.assignedUserName)) {
         return 'Task assigned user must be text';
     }
+    if (body.assignedUser && !mongoose.isObjectIdOrHexString(body.assignedUser)) {
+        return 'Task assigned user must be a valid user id';
+    }
     return null;
 }
 
@@ -47,8 +51,41 @@ function taskFields(body) {
         deadline: body.deadline,
         completed: body.completed ?? false,
         assignedUser: body.assignedUser ?? '',
-        assignedUserName: body.assignedUserName ?? 'unassigned',
+        assignedUserName: body.assignedUserName ?? null,
     };
+}
+
+// Fill in assignedUserName from the assigned user, returning an error when the two disagree
+async function resolveAssignee(fields) {
+    if (fields.assignedUser === '') {
+        if (fields.assignedUserName !== null && fields.assignedUserName !== 'unassigned') {
+            return { status: 400, message: 'An unassigned task must have assignedUserName "unassigned"' };
+        }
+        fields.assignedUserName = 'unassigned';
+        return null;
+    }
+    var user = await User.findById(fields.assignedUser);
+    if (!user) {
+        return { status: 404, message: 'Assigned user not found' };
+    }
+    if (fields.assignedUserName !== null && fields.assignedUserName !== user.name) {
+        return { status: 400, message: 'assignedUserName does not match the assigned user' };
+    }
+    fields.assignedUserName = user.name;
+    return null;
+}
+
+function removeFromPendingTasks(taskId) {
+    return User.updateMany({ pendingTasks: taskId }, { $pull: { pendingTasks: taskId } });
+}
+
+// Pull the task from every user, then give it back to its assigned user only while it is pending
+async function syncPendingTasks(task) {
+    var taskId = String(task._id);
+    await removeFromPendingTasks(taskId);
+    if (task.assignedUser !== '' && !task.completed) {
+        await User.updateOne({ _id: task.assignedUser }, { $addToSet: { pendingTasks: taskId } });
+    }
 }
 
 module.exports = function (router) {
@@ -81,7 +118,17 @@ module.exports = function (router) {
             if (error) {
                 return res.status(400).json({ message: error, data: {} });
             }
-            var task = await Task.create(taskFields(body));
+            var fields = taskFields(body);
+            var assigneeError = await resolveAssignee(fields);
+            if (assigneeError) {
+                return res.status(assigneeError.status).json({ message: assigneeError.message, data: {} });
+            }
+            // Write the task and its user updates together so a failure leaves nothing half done
+            var task = await mongoose.connection.transaction(async function () {
+                var createdTask = await Task.create(fields);
+                await syncPendingTasks(createdTask);
+                return createdTask;
+            });
             res.status(201).json({ message: 'Task created', data: task });
         } catch (err) {
             common.sendServerError(res);
@@ -125,8 +172,16 @@ module.exports = function (router) {
             if (error) {
                 return res.status(400).json({ message: error, data: {} });
             }
-            task.set(taskFields(body));
-            await task.save();
+            var fields = taskFields(body);
+            var assigneeError = await resolveAssignee(fields);
+            if (assigneeError) {
+                return res.status(assigneeError.status).json({ message: assigneeError.message, data: {} });
+            }
+            task.set(fields);
+            await mongoose.connection.transaction(async function () {
+                await task.save();
+                await syncPendingTasks(task);
+            });
             res.status(200).json({ message: 'Task updated', data: task });
         } catch (err) {
             common.sendServerError(res);
@@ -139,7 +194,10 @@ module.exports = function (router) {
             if (!task) {
                 return res.status(404).json({ message: 'Task not found', data: {} });
             }
-            await task.deleteOne();
+            await mongoose.connection.transaction(async function () {
+                await task.deleteOne();
+                await removeFromPendingTasks(String(task._id));
+            });
             res.status(200).json({ message: 'Task deleted', data: task });
         } catch (err) {
             common.sendServerError(res);
