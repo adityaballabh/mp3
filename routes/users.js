@@ -216,7 +216,7 @@ module.exports = function (router) {
                 await user.deleteOne();
                 await unassignTasks({ assignedUser: String(user._id) });
             });
-            res.status(200).json({ message: 'User deleted', data: user });
+            res.status(204).end();
         } catch (err) {
             common.sendServerError(res);
         }

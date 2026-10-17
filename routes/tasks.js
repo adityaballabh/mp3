@@ -198,7 +198,7 @@ module.exports = function (router) {
                 await task.deleteOne();
                 await removeFromPendingTasks(String(task._id));
             });
-            res.status(200).json({ message: 'Task deleted', data: task });
+            res.status(204).end();
         } catch (err) {
             common.sendServerError(res);
         }
