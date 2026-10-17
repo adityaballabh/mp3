@@ -8,6 +8,13 @@ async function findById(model, id) {
     return model.findById(id);
 }
 
+async function existsById(model, id) {
+    if (!mongoose.isObjectIdOrHexString(id)) {
+        return false;
+    }
+    return (await model.exists({ _id: id })) !== null;
+}
+
 function isFilledString(value) {
     return typeof value === 'string' && value.trim() !== '';
 }
@@ -26,4 +33,27 @@ function sendServerError(res) {
     });
 }
 
-module.exports = { findById, isFilledString, sendInvalidBody, sendServerError };
+function sendInvalidQuery(res) {
+    res.status(400).json({
+        message: 'Query parameters are not valid',
+        data: {},
+    });
+}
+
+// MongoDB rejecting the query means a bad client value like a mixed select, anything else is on the server
+function sendQueryError(res, err) {
+    if (err.name === 'MongoServerError') {
+        return sendInvalidQuery(res);
+    }
+    sendServerError(res);
+}
+
+module.exports = {
+    existsById,
+    findById,
+    isFilledString,
+    sendInvalidBody,
+    sendInvalidQuery,
+    sendQueryError,
+    sendServerError,
+};

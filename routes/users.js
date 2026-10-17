@@ -1,4 +1,5 @@
 var common = require('./common');
+var queryParams = require('./query');
 var User = require('../models/user');
 
 function validateUser(body) {
@@ -48,11 +49,17 @@ module.exports = function (router) {
     var userRoute = router.route('/users/:id');
 
     usersRoute.get(async function (req, res) {
+        var query;
         try {
-            var users = await User.find();
+            query = queryParams.buildListQuery(User, req.query);
+        } catch (err) {
+            return common.sendInvalidQuery(res);
+        }
+        try {
+            var users = await query;
             res.status(200).json({ message: 'OK', data: users });
         } catch (err) {
-            common.sendServerError(res);
+            common.sendQueryError(res, err);
         }
     });
 
@@ -78,14 +85,25 @@ module.exports = function (router) {
     });
 
     userRoute.get(async function (req, res) {
+        // Check the id before select so a missing user gets 404 even with a bad select
         try {
-            var user = await common.findById(User, req.params.id);
-            if (!user) {
+            if (!(await common.existsById(User, req.params.id))) {
                 return res.status(404).json({ message: 'User not found', data: {} });
             }
+        } catch (err) {
+            return common.sendServerError(res);
+        }
+        var select;
+        try {
+            select = queryParams.parseObject(req.query.select);
+        } catch (err) {
+            return common.sendInvalidQuery(res);
+        }
+        try {
+            var user = await User.findById(req.params.id, select);
             res.status(200).json({ message: 'OK', data: user });
         } catch (err) {
-            common.sendServerError(res);
+            common.sendQueryError(res, err);
         }
     });
 

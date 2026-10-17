@@ -1,5 +1,6 @@
 var mongoose = require('mongoose');
 var common = require('./common');
+var queryParams = require('./query');
 var Task = require('../models/task');
 
 var castDate = mongoose.Schema.Types.Date.cast();
@@ -55,11 +56,17 @@ module.exports = function (router) {
     var taskRoute = router.route('/tasks/:id');
 
     tasksRoute.get(async function (req, res) {
+        var query;
         try {
-            var tasks = await Task.find();
+            query = queryParams.buildListQuery(Task, req.query, 100);
+        } catch (err) {
+            return common.sendInvalidQuery(res);
+        }
+        try {
+            var tasks = await query;
             res.status(200).json({ message: 'OK', data: tasks });
         } catch (err) {
-            common.sendServerError(res);
+            common.sendQueryError(res, err);
         }
     });
 
@@ -82,14 +89,25 @@ module.exports = function (router) {
     });
 
     taskRoute.get(async function (req, res) {
+        // Check the id before select so a missing task gets 404 even with a bad select
         try {
-            var task = await common.findById(Task, req.params.id);
-            if (!task) {
+            if (!(await common.existsById(Task, req.params.id))) {
                 return res.status(404).json({ message: 'Task not found', data: {} });
             }
+        } catch (err) {
+            return common.sendServerError(res);
+        }
+        var select;
+        try {
+            select = queryParams.parseObject(req.query.select);
+        } catch (err) {
+            return common.sendInvalidQuery(res);
+        }
+        try {
+            var task = await Task.findById(req.params.id, select);
             res.status(200).json({ message: 'OK', data: task });
         } catch (err) {
-            common.sendServerError(res);
+            common.sendQueryError(res, err);
         }
     });
 
