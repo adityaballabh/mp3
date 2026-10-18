@@ -37,13 +37,13 @@ function buildListQuery(model, params, defaultLimit) {
     var limit = parseWholeNumber(params.limit);
     var query;
     if (parseCount(params.count)) {
-        // Count every match unless the client capped it, so the default limit only pages documents
         query = model.countDocuments(where);
     } else {
         query = model
             .find(where)
             .sort(parseObject(params.sort))
             .select(parseObject(params.select));
+        // Apply the default limit only to find so count still counts every match
         limit = limit ?? defaultLimit;
     }
     if (skip !== undefined) {
@@ -53,6 +53,7 @@ function buildListQuery(model, params, defaultLimit) {
     if (limit) {
         query.limit(limit);
     }
+    // Cast the filter now so a bad value like a malformed id throws here instead of when the query runs
     query.cast();
     return query;
 }

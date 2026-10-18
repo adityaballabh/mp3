@@ -1,17 +1,9 @@
 var mongoose = require('mongoose');
 var common = require('./common');
-var queryParams = require('./query');
 var Task = require('../models/task');
 var User = require('../models/user');
 
-function areTaskIds(values) {
-    for (var value of values) {
-        if (!mongoose.isObjectIdOrHexString(value)) {
-            return false;
-        }
-    }
-    return true;
-}
+var emailTakenMessage = 'A user with this email already exists';
 
 function validateUser(body) {
     if (!common.isFilledString(body.name)) {
@@ -20,11 +12,13 @@ function validateUser(body) {
     if (!common.isFilledString(body.email)) {
         return 'User email is required';
     }
-    if (body.pendingTasks != null && !Array.isArray(body.pendingTasks)) {
-        return 'User pendingTasks must be a list';
-    }
-    if (body.pendingTasks != null && !areTaskIds(body.pendingTasks)) {
-        return 'User pendingTasks must contain valid task ids';
+    if (body.pendingTasks != null) {
+        if (!Array.isArray(body.pendingTasks)) {
+            return 'User pendingTasks must be a list';
+        }
+        if (!body.pendingTasks.every(mongoose.isObjectIdOrHexString)) {
+            return 'User pendingTasks must contain valid task ids';
+        }
     }
     return null;
 }
@@ -65,6 +59,7 @@ async function syncAssignedTasks(user, oldTaskIds) {
         return !newTaskIds.includes(taskId);
     });
     await unassignTasks({ _id: { $in: droppedTaskIds }, assignedUser: userId });
+    // Take the new tasks off any other user who still lists them
     await User.updateMany(
         { _id: { $ne: user._id }, pendingTasks: { $in: newTaskIds } },
         { $pull: { pendingTasks: { $in: newTaskIds } } },
@@ -84,17 +79,27 @@ async function isEmailTaken(email, ownId) {
     return User.exists(query);
 }
 
-function sendEmailTaken(res) {
-    res.status(400).json({
-        message: 'A user with this email already exists',
-        data: {},
-    });
+// Validate the body and build the user fields, returning the first error with its status
+async function prepareUser(body, ownId) {
+    var message = validateUser(body);
+    if (message) {
+        return { error: { status: 400, message: message } };
+    }
+    if (await isEmailTaken(body.email, ownId)) {
+        return { error: { status: 400, message: emailTakenMessage } };
+    }
+    var fields = userFields(body);
+    var taskError = await checkPendingTasks(fields.pendingTasks);
+    if (taskError) {
+        return { error: taskError };
+    }
+    return { fields: fields };
 }
 
 // Catch a duplicate email that slipped past isEmailTaken when two requests race
 function sendSaveError(res, err) {
     if (err.code === 11000) {
-        return sendEmailTaken(res);
+        return common.sendError(res, 400, emailTakenMessage);
     }
     common.sendServerError(res);
 }
@@ -103,20 +108,7 @@ module.exports = function (router) {
     var usersRoute = router.route('/users');
     var userRoute = router.route('/users/:id');
 
-    usersRoute.get(async function (req, res) {
-        var query;
-        try {
-            query = queryParams.buildListQuery(User, req.query);
-        } catch (err) {
-            return common.sendInvalidQuery(res);
-        }
-        try {
-            var users = await query;
-            res.status(200).json({ message: 'OK', data: users });
-        } catch (err) {
-            common.sendQueryError(res, err);
-        }
-    });
+    usersRoute.get(common.listHandler(User));
 
     usersRoute.post(async function (req, res) {
         try {
@@ -124,22 +116,13 @@ module.exports = function (router) {
                 return common.sendInvalidBody(res);
             }
             // Express leaves the body undefined when the request has none
-            var body = req.body ?? {};
-            var error = validateUser(body);
-            if (error) {
-                return res.status(400).json({ message: error, data: {} });
-            }
-            if (await isEmailTaken(body.email)) {
-                return sendEmailTaken(res);
-            }
-            var fields = userFields(body);
-            var taskError = await checkPendingTasks(fields.pendingTasks);
-            if (taskError) {
-                return res.status(taskError.status).json({ message: taskError.message, data: {} });
+            var result = await prepareUser(req.body ?? {});
+            if (result.error) {
+                return common.sendPrepareError(res, result.error);
             }
             // Write the user and its task updates together so a failure leaves nothing half done
             var user = await mongoose.connection.transaction(async function () {
-                var createdUser = await User.create(fields);
+                var createdUser = await User.create(result.fields);
                 await syncAssignedTasks(createdUser, []);
                 return createdUser;
             });
@@ -149,53 +132,23 @@ module.exports = function (router) {
         }
     });
 
-    userRoute.get(async function (req, res) {
-        // Check the id before select so a missing user gets 404 even with a bad select
-        try {
-            if (!(await common.existsById(User, req.params.id))) {
-                return res.status(404).json({ message: 'User not found', data: {} });
-            }
-        } catch (err) {
-            return common.sendServerError(res);
-        }
-        var select;
-        try {
-            select = queryParams.parseObject(req.query.select);
-        } catch (err) {
-            return common.sendInvalidQuery(res);
-        }
-        try {
-            var user = await User.findById(req.params.id, select);
-            res.status(200).json({ message: 'OK', data: user });
-        } catch (err) {
-            common.sendQueryError(res, err);
-        }
-    });
+    userRoute.get(common.getByIdHandler(User, 'User not found'));
 
     userRoute.put(async function (req, res) {
         try {
             var user = await common.findById(User, req.params.id);
             if (!user) {
-                return res.status(404).json({ message: 'User not found', data: {} });
+                return common.sendError(res, 404, 'User not found');
             }
             if (req.bodyParseFailed) {
                 return common.sendInvalidBody(res);
             }
-            var body = req.body ?? {};
-            var error = validateUser(body);
-            if (error) {
-                return res.status(400).json({ message: error, data: {} });
-            }
-            if (await isEmailTaken(body.email, user._id)) {
-                return sendEmailTaken(res);
-            }
-            var fields = userFields(body);
-            var taskError = await checkPendingTasks(fields.pendingTasks);
-            if (taskError) {
-                return res.status(taskError.status).json({ message: taskError.message, data: {} });
+            var result = await prepareUser(req.body ?? {}, user._id);
+            if (result.error) {
+                return common.sendPrepareError(res, result.error);
             }
             var oldTaskIds = user.pendingTasks.toObject();
-            user.set(fields);
+            user.set(result.fields);
             await mongoose.connection.transaction(async function () {
                 await user.save();
                 await syncAssignedTasks(user, oldTaskIds);
@@ -210,7 +163,7 @@ module.exports = function (router) {
         try {
             var user = await common.findById(User, req.params.id);
             if (!user) {
-                return res.status(404).json({ message: 'User not found', data: {} });
+                return common.sendError(res, 404, 'User not found');
             }
             await mongoose.connection.transaction(async function () {
                 await user.deleteOne();
@@ -221,6 +174,4 @@ module.exports = function (router) {
             common.sendServerError(res);
         }
     });
-
-    return router;
 };

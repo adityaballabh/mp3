@@ -2,7 +2,8 @@
 var http = require('http'),
     express = require('express'),
     router = express.Router(),
-    mongoose = require('mongoose');
+    mongoose = require('mongoose'),
+    common = require('./routes/common');
 
 // Read .env file
 require('dotenv').config();
@@ -16,7 +17,7 @@ var port = process.env.PORT || 3000;
 // Let queries inside connection.transaction() pick up its session without passing it
 mongoose.set('transactionAsyncLocalStorage', true);
 
-// Connect to a MongoDB --> Uncomment this once you have a connection string!!
+// Connect to Atlas
 mongoose.connect(process.env.MONGODB_URI).catch(function (err) {
     console.error('MongoDB connection error:', err.message);
 });
@@ -49,15 +50,17 @@ app.use(function (err, req, res, next) {
 // Use routes as a module (see index.js)
 require('./routes')(app, router);
 
+// Send unknown routes a JSON 404 to match the other responses
+app.use(function (req, res) {
+    common.sendError(res, 404, 'Route not found');
+});
+
 // Send errors as JSON instead of Express's default HTML page, keeping client error statuses
 app.use(function (err, req, res, next) {
     if (err.status >= 400 && err.status < 500) {
-        return res.status(err.status).json({ message: http.STATUS_CODES[err.status], data: {} });
+        return common.sendError(res, err.status, http.STATUS_CODES[err.status]);
     }
-    res.status(500).json({
-        message: 'Something went wrong on the server',
-        data: {},
-    });
+    common.sendServerError(res);
 });
 
 // Start the server

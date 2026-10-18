@@ -5,6 +5,4 @@ module.exports = function (router) {
         var connectionString = process.env.TOKEN;
         res.json({ message: 'My connection string is ' + connectionString });
     });
-
-    return router;
 };

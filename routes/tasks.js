@@ -1,6 +1,5 @@
 var mongoose = require('mongoose');
 var common = require('./common');
-var queryParams = require('./query');
 var Task = require('../models/task');
 var User = require('../models/user');
 
@@ -75,6 +74,20 @@ async function resolveAssignee(fields) {
     return null;
 }
 
+// Validate the body and build the task fields, returning the first error with its status
+async function prepareTask(body) {
+    var message = validateTask(body);
+    if (message) {
+        return { error: { status: 400, message: message } };
+    }
+    var fields = taskFields(body);
+    var assigneeError = await resolveAssignee(fields);
+    if (assigneeError) {
+        return { error: assigneeError };
+    }
+    return { fields: fields };
+}
+
 function removeFromPendingTasks(taskId) {
     return User.updateMany({ pendingTasks: taskId }, { $pull: { pendingTasks: taskId } });
 }
@@ -92,20 +105,7 @@ module.exports = function (router) {
     var tasksRoute = router.route('/tasks');
     var taskRoute = router.route('/tasks/:id');
 
-    tasksRoute.get(async function (req, res) {
-        var query;
-        try {
-            query = queryParams.buildListQuery(Task, req.query, 100);
-        } catch (err) {
-            return common.sendInvalidQuery(res);
-        }
-        try {
-            var tasks = await query;
-            res.status(200).json({ message: 'OK', data: tasks });
-        } catch (err) {
-            common.sendQueryError(res, err);
-        }
-    });
+    tasksRoute.get(common.listHandler(Task, 100));
 
     tasksRoute.post(async function (req, res) {
         try {
@@ -113,19 +113,13 @@ module.exports = function (router) {
                 return common.sendInvalidBody(res);
             }
             // Express leaves the body undefined when the request has none
-            var body = req.body ?? {};
-            var error = validateTask(body);
-            if (error) {
-                return res.status(400).json({ message: error, data: {} });
-            }
-            var fields = taskFields(body);
-            var assigneeError = await resolveAssignee(fields);
-            if (assigneeError) {
-                return res.status(assigneeError.status).json({ message: assigneeError.message, data: {} });
+            var result = await prepareTask(req.body ?? {});
+            if (result.error) {
+                return common.sendPrepareError(res, result.error);
             }
             // Write the task and its user updates together so a failure leaves nothing half done
             var task = await mongoose.connection.transaction(async function () {
-                var createdTask = await Task.create(fields);
+                var createdTask = await Task.create(result.fields);
                 await syncPendingTasks(createdTask);
                 return createdTask;
             });
@@ -135,49 +129,22 @@ module.exports = function (router) {
         }
     });
 
-    taskRoute.get(async function (req, res) {
-        // Check the id before select so a missing task gets 404 even with a bad select
-        try {
-            if (!(await common.existsById(Task, req.params.id))) {
-                return res.status(404).json({ message: 'Task not found', data: {} });
-            }
-        } catch (err) {
-            return common.sendServerError(res);
-        }
-        var select;
-        try {
-            select = queryParams.parseObject(req.query.select);
-        } catch (err) {
-            return common.sendInvalidQuery(res);
-        }
-        try {
-            var task = await Task.findById(req.params.id, select);
-            res.status(200).json({ message: 'OK', data: task });
-        } catch (err) {
-            common.sendQueryError(res, err);
-        }
-    });
+    taskRoute.get(common.getByIdHandler(Task, 'Task not found'));
 
     taskRoute.put(async function (req, res) {
         try {
             var task = await common.findById(Task, req.params.id);
             if (!task) {
-                return res.status(404).json({ message: 'Task not found', data: {} });
+                return common.sendError(res, 404, 'Task not found');
             }
             if (req.bodyParseFailed) {
                 return common.sendInvalidBody(res);
             }
-            var body = req.body ?? {};
-            var error = validateTask(body);
-            if (error) {
-                return res.status(400).json({ message: error, data: {} });
+            var result = await prepareTask(req.body ?? {});
+            if (result.error) {
+                return common.sendPrepareError(res, result.error);
             }
-            var fields = taskFields(body);
-            var assigneeError = await resolveAssignee(fields);
-            if (assigneeError) {
-                return res.status(assigneeError.status).json({ message: assigneeError.message, data: {} });
-            }
-            task.set(fields);
+            task.set(result.fields);
             await mongoose.connection.transaction(async function () {
                 await task.save();
                 await syncPendingTasks(task);
@@ -192,7 +159,7 @@ module.exports = function (router) {
         try {
             var task = await common.findById(Task, req.params.id);
             if (!task) {
-                return res.status(404).json({ message: 'Task not found', data: {} });
+                return common.sendError(res, 404, 'Task not found');
             }
             await mongoose.connection.transaction(async function () {
                 await task.deleteOne();
@@ -203,6 +170,4 @@ module.exports = function (router) {
             common.sendServerError(res);
         }
     });
-
-    return router;
 };
