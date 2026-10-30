@@ -1,7 +1,7 @@
 var mongoose = require('mongoose');
 var queryParams = require('./query');
 
-// Treat malformed ids as missing so lookups give 404 instead of a cast error
+// Treat malformed ids as missing so lookups give 404
 async function findById(model, id) {
     if (!mongoose.isObjectIdOrHexString(id)) {
         return null;

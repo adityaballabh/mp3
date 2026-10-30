@@ -30,7 +30,7 @@ function parseWholeNumber(value) {
     return Number(value);
 }
 
-// Build the find or count query, throwing on any client value Mongoose rejects before it runs
+// Build the find or count query from the URL params
 function buildListQuery(model, params, defaultLimit) {
     var where = parseObject(params.where) ?? {};
     var skip = parseWholeNumber(params.skip);
@@ -53,7 +53,7 @@ function buildListQuery(model, params, defaultLimit) {
     if (limit) {
         query.limit(limit);
     }
-    // Cast the filter now so a bad value like a malformed id throws here instead of when the query runs
+    // Cast the filter now so a bad value like a malformed id throws here and becomes a 400
     query.cast();
     return query;
 }

@@ -55,7 +55,7 @@ app.use(function (req, res) {
     common.sendError(res, 404, 'Route not found');
 });
 
-// Send errors as JSON instead of Express's default HTML page, keeping client error statuses
+// Send leftover errors as JSON, keeping 4xx statuses and turning the rest into a 500
 app.use(function (err, req, res, next) {
     if (err.status >= 400 && err.status < 500) {
         return common.sendError(res, err.status, http.STATUS_CODES[err.status]);
